@@ -1,0 +1,5 @@
+curl -X GET \
+'https://api.uspto.gov/api/v1/datasets/products/PTBLXML?fileDataFromDate=2002-01-01&fileDataToDate=2026-04-25&includeFiles=true' \
+-H 'Accept: application/json' \
+-H 'Content-Type: application/json' \
+-H 'x-api-key: <your-api-key>' 

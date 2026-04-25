@@ -1,0 +1,23 @@
+# Database
+bibliographic_data.db
+bibliographic_data.db-wal
+bibliographic_data.db-shm
+
+# Downloaded and extracted data
+downloads/
+extracted/
+
+# Logs
+biblio_mirror.log
+logs/
+
+# Sample data zips
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
