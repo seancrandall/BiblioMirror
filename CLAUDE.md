@@ -15,20 +15,27 @@ pip install lxml requests pytest
 # Initialize database (idempotent)
 python3 init_db.py [--db PATH]
 
-# Download data (requires ODP_API_KEY env var or --api-key-file)
-python3 download_uspto.py --dataset publication --start-date 2001-03-15 --end-date YYYY-MM-DD
-python3 download_uspto.py --dataset grant --start-date 2002-01-01 --end-date YYYY-MM-DD
+# Download + process in streaming mode (recommended: minimizes disk usage)
+# Each zip is downloaded, extracted, processed, and cleaned up before moving to the next.
+python3 download_uspto.py --dataset publication --start-date 2001-03-15 --end-date YYYY-MM-DD --process --db bibliographic_data.db
+python3 download_uspto.py --dataset grant --start-date 2002-01-01 --end-date YYYY-MM-DD --process --db bibliographic_data.db
 
-# Process XML into database
+# Download data only (no processing — leaves zips and XMLs on disk)
+python3 download_uspto.py --dataset publication --start-date 2001-03-15 --end-date YYYY-MM-DD
+
+# Process existing XML into database (standalone, for already-downloaded data)
 python3 process_uspto.py --dataset {publication,grant}
 python3 process_uspto.py --dataset {publication,grant} --delete-source-data  # cleanup after import
 python3 process_uspto.py --dataset {publication,grant} --file specific.xml  # single file
 
+# Full-corpus load (streaming mode — uses --process to interleave download and processing)
+./process_all.sh
+
+# Weekly cron job (streaming mode — downloads from last Thursday to today)
+./run_weekly.sh
+
 # Run tests
 pytest test_uspto.py -v
-
-# Weekly cron job (downloads from last Thursday to today, processes both datasets)
-./run_weekly.sh
 
 # Monitor bulk load progress (polls every 5 min)
 ./watch_progress.sh
@@ -36,21 +43,33 @@ pytest test_uspto.py -v
 
 ## Architecture
 
-Three-stage pipeline: **Download → Extract → Process**
+Two modes: **streaming** (recommended) and **separate** (legacy).
 
-1. **`download_uspto.py`** — Queries the USPTO ODP REST API (`APPBLXML` for publications, `PTBLXML` for grants), downloads zip files, extracts XML into `extracted/{dataset}/`. Uses rate limiting (default 3 rps) and retry logic for 429/5xx. Splits large date ranges into configurable batch-weeks.
+### Streaming mode (`--process` flag)
 
-2. **`process_uspto.py`** — The core. Does three things:
-   - **XML splitting**: USPTO bulk files contain concatenated XML documents with individual `<?xml>` declarations. `split_xml_records()` splits on those boundaries and strips DOCTYPE lines.
-   - **Parsing**: `parse_publication()` and `parse_grant()` walk the lxml tree, returning nested dicts. Grant parser handles additional elements (examiners, attorneys, references cited, grant term, classification search fields, etc.).
-   - **Database loading**: `DatabaseLoader` inserts records with entity dedup via SHA256 hashes (`entity_hash` column on `person`, `assignee`, `examiner`, `attorney_agent_firm`). Uses in-memory caches to avoid repeated DB lookups. Processes files idempotently — checks `processed_file` table before re-importing. WAL journal mode for concurrent read access during bulk loads.
+With `--process --db`, `download_uspto.py` downloads one zip at a time, extracts its XMLs, deletes the zip, processes each XML into the database, then deletes the XML before moving to the next zip. This keeps peak disk usage at roughly one zip + one XML + database size (vs. 3x for the legacy mode).
 
-3. **`init_db.py`** — Creates the full schema (25+ tables, indexes, seed data). All DDL is `CREATE IF NOT EXISTS`, so it's safe to re-run.
+1. **`download_uspto.py --process`** — For each zip: download → extract → delete zip → process XML into DB → delete XML. Uses `process_file()` from `process_uspto.py` internally. Checks `processed_file` table for idempotency — re-runs skip already-processed files and clean up leftover disk artifacts.
+
+2. **`process_all.sh` / `run_weekly.sh`** — Shell scripts that use `--process --db` mode. `process_all.sh` runs a full corpus load; `run_weekly.sh` runs incremental weekly updates.
+
+### Separate mode (legacy)
+
+Without `--process`, `download_uspto.py` downloads all zips and extracts all XMLs, then `process_uspto.py` processes them in a separate step. This requires enough disk for all zips + all XMLs + the database simultaneously (~150GB for full corpus). Use `--delete-source-data` to clean up after processing.
+
+### Core modules
+
+- **`download_uspto.py`** — Queries the USPTO ODP REST API (`APPBLXML` for publications, `PTBLXML` for grants), downloads zip files, extracts XML. With `--process`, also processes each file into the database immediately. Uses rate limiting (default 3 rps) and retry logic for 429/5xx. Splits large date ranges into configurable batch-weeks.
+
+- **`process_uspto.py`** — Parses XML and loads into SQLite. `process_file()` is the entry point used by streaming mode. Standalone CLI mode processes all unprocessed XMLs in `extracted/{dataset}/`. Features: XML splitting, entity dedup via SHA256 hashes, idempotent processing via `processed_file` table, `--delete-source-data` for cleanup.
+
+- **`init_db.py`** — Creates the full schema (25+ tables, indexes, seed data). All DDL is `CREATE IF NOT EXISTS`, so it's safe to re-run.
 
 ## Key Design Decisions
 
+- **Streaming mode (recommended)**: With `--process --db`, each zip is processed and cleaned up before downloading the next. Peak disk usage is ~one zip + one XML + database size (~55GB for full corpus vs. ~155GB in legacy mode).
 - **Entity deduplication**: Shared `person` table for both inventors and applicants across publications and grants. Dedup is by `entity_hash` (SHA256 of normalized field concatenation). Same person appearing in multiple patents gets one row.
-- **Idempotent processing**: The `processed_file` table tracks which XML files have been imported. Re-running `process_uspto.py` skips already-processed files.
+- **Idempotent processing**: The `processed_file` table tracks which XML files have been imported. Re-running either mode skips already-processed files. In streaming mode, the `processed_file` check happens before downloading, so interrupted runs resume cleanly.
 - **Polymorphic classification tables**: `classification_ipcr`, `classification_cpc`, and `classification_national` use `source_type` ('publication'/'grant') + `source_id` to reference either main table, rather than separate tables per dataset.
 - **Date ranges**: Publications available from 2001-03-15, grants from 2002-01-01.
 - **API key**: `ODP_API_KEY` env var (preferred) or `--api-key-file` flag. No hardcoded path.

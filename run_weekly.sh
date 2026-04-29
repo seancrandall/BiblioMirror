@@ -1,7 +1,7 @@
 #!/bin/bash
-# run_weekly.sh — Weekly USPTO bibliographic data update script
+# run_weekly.sh — Weekly USPTO bibliographic data update script (streaming mode)
 # Designed to run every Wednesday at 1 AM via cron
-# Downloads from last Thursday to this Wednesday, processes into database
+# Downloads from last Thursday to today, processes each file one-at-a-time
 
 set -euo pipefail
 
@@ -25,45 +25,36 @@ mkdir -p "${LOGDIR}" "${WORKDIR}/downloads/publication" "${WORKDIR}/downloads/gr
 
 echo "" >> "${LOGFILE}"
 echo "========================================" >> "${LOGFILE}"
-echo "$(date -Iseconds): Starting weekly run — ${START_DATE} to ${END_DATE}" >> "${LOGFILE}"
+echo "$(date -Iseconds): Starting weekly run (streaming) — ${START_DATE} to ${END_DATE}" >> "${LOGFILE}"
 echo "========================================" >> "${LOGFILE}"
 
-# Download publications
-echo "$(date -Iseconds): Downloading publications..." >> "${LOGFILE}"
+# Ensure DB schema exists (idempotent)
+python3 "${WORKDIR}/init_db.py" --db "${DB}" 2>&1 | tee -a "${LOGFILE}"
+
+# Download + process publications (streaming)
+echo "$(date -Iseconds): Downloading + processing publications..." >> "${LOGFILE}"
 python3 "${WORKDIR}/download_uspto.py" \
     --dataset publication \
     --start-date "${START_DATE}" \
     --end-date "${END_DATE}" \
     --output-dir "${WORKDIR}" \
     --skip-existing \
+    --process \
+    --db "${DB}" \
     2>&1 | tee -a "${LOGFILE}"
 
-# Download grants
-echo "$(date -Iseconds): Downloading grants..." >> "${LOGFILE}"
+# Download + process grants (streaming)
+echo "$(date -Iseconds): Downloading + processing grants..." >> "${LOGFILE}"
 python3 "${WORKDIR}/download_uspto.py" \
     --dataset grant \
     --start-date "${START_DATE}" \
     --end-date "${END_DATE}" \
     --output-dir "${WORKDIR}" \
     --skip-existing \
-    2>&1 | tee -a "${LOGFILE}"
-
-# Process publications (delete source data after successful import)
-echo "$(date -Iseconds): Processing publications..." >> "${LOGFILE}"
-python3 "${WORKDIR}/process_uspto.py" \
-    --dataset publication \
+    --process \
     --db "${DB}" \
-    --delete-source-data \
     2>&1 | tee -a "${LOGFILE}"
 
-# Process grants (delete source data after successful import)
-echo "$(date -Iseconds): Processing grants..." >> "${LOGFILE}"
-python3 "${WORKDIR}/process_uspto.py" \
-    --dataset grant \
-    --db "${DB}" \
-    --delete-source-data \
-    2>&1 | tee -a "${LOGFILE}"
-
-echo "$(date -Iseconds): Weekly run complete" >> "${LOGFILE}"
+echo "$(date -Iseconds): Weekly run complete (streaming)" >> "${LOGFILE}"
 echo "Publications: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM publication;')" >> "${LOGFILE}"
 echo "Grants: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM grant;')" >> "${LOGFILE}"

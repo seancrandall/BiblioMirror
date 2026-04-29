@@ -297,8 +297,18 @@ def extract_xml_from_zip(zip_path, output_dir):
 
 
 def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
-                     batch_weeks=10, skip_existing=True):
-    """Download all files for a dataset within a date range."""
+                     batch_weeks=10, skip_existing=True, db_path=None):
+    """Download all files for a dataset within a date range.
+
+    When db_path is set, enters streaming mode: after extracting each zip,
+    immediately processes its XMLs into the database and deletes both the
+    zip and XML files. This minimizes peak disk usage during bulk loads.
+    """
+    if db_path:
+        from init_db import init_db
+        if not os.path.exists(db_path):
+            init_db(db_path)
+
     product = DATASET_PRODUCTS[dataset]
     download_dir = os.path.join(output_dir, "downloads", dataset)
     extract_dir = os.path.join(output_dir, "extracted", dataset)
@@ -306,7 +316,9 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
     os.makedirs(extract_dir, exist_ok=True)
 
     batches = partition_date_range(start_date, end_date, batch_weeks)
-    logging.info("Downloading %s: %s to %s in %d batches", dataset, start_date, end_date, len(batches))
+    mode_label = "streaming" if db_path else "download-only"
+    logging.info("Downloading %s (%s mode): %s to %s in %d batches",
+                 dataset, mode_label, start_date, end_date, len(batches))
 
     total_files = 0
     seen_names = set()
@@ -344,7 +356,43 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
 
             seen_names.add(name)
 
-            if skip_existing and os.path.exists(zip_path):
+            # Streaming mode: skip if already processed (check DB)
+            if db_path:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                # Check if zip is already fully processed by looking up its XML(s)
+                # For zips on disk, peek at the namelist; otherwise guess from zip name
+                xml_names = None
+                if os.path.exists(zip_path):
+                    try:
+                        xml_names = [n for n in zipfile.ZipFile(zip_path, "r").namelist()
+                                     if n.endswith(".xml")]
+                    except zipfile.BadZipFile:
+                        pass
+                if not xml_names:
+                    xml_names = [name.replace(".zip", ".xml")]
+                all_processed = all(
+                    conn.execute(
+                        "SELECT id FROM processed_file WHERE filename = ?", (xn,)
+                    ).fetchone() is not None
+                    for xn in xml_names
+                )
+                conn.close()
+                if all_processed:
+                    logging.info("Skipping already-processed zip: %s", name)
+                    # Clean up any leftover files on disk
+                    for xn in xml_names:
+                        leftover_xml = os.path.join(extract_dir, xn)
+                        if os.path.exists(leftover_xml):
+                            os.remove(leftover_xml)
+                            logging.info("Cleaned up leftover XML: %s", leftover_xml)
+                    if os.path.exists(zip_path):
+                        os.remove(zip_path)
+                        logging.info("Cleaned up leftover zip: %s", zip_path)
+                    continue
+
+            # Download-only mode: skip if zip already exists on disk
+            if not db_path and skip_existing and os.path.exists(zip_path):
                 logging.info("Skipping existing: %s", name)
                 # Still need to extract if not done
                 xml_files = [n for n in zipfile.ZipFile(zip_path, "r").namelist() if n.endswith(".xml")]
@@ -353,12 +401,42 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
                     extract_xml_from_zip(zip_path, extract_dir)
                 continue
 
-            if download_zip(url, zip_path, api_key, rl):
-                logging.info("Downloaded: %s (%d bytes)", name, os.path.getsize(zip_path))
-                extract_xml_from_zip(zip_path, extract_dir)
-                total_files += 1
-            else:
+            # Streaming mode: reuse existing zip on disk (interrupted run)
+            if db_path and skip_existing and os.path.exists(zip_path):
+                logging.info("Resuming from existing zip: %s", name)
+            elif not download_zip(url, zip_path, api_key, rl):
                 logging.error("Failed to download: %s", name)
+                continue
+            else:
+                logging.info("Downloaded: %s (%d bytes)", name, os.path.getsize(zip_path))
+
+            # Extract XMLs from zip
+            xml_files = extract_xml_from_zip(zip_path, extract_dir)
+            if not xml_files:
+                logging.error("No XML files extracted from %s", name)
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                continue
+
+            # Streaming mode: process each XML, then clean up
+            if db_path:
+                from process_uspto import process_file
+
+                # Delete zip now — XMLs are extracted
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                    logging.info("Deleted zip after extraction: %s", name)
+
+                for xml_name in xml_files:
+                    xml_path = os.path.join(extract_dir, xml_name)
+                    logging.info("Processing: %s", xml_name)
+                    process_file(xml_path, db_path, dataset,
+                                 delete_source=True, download_dir=None)
+                total_files += 1
+                continue
+
+            # Download-only mode: keep zip + extracted XMLs for later processing
+            total_files += 1
 
     logging.info("Download complete: %d new files for %s", total_files, dataset)
     return total_files
@@ -380,10 +458,17 @@ def main():
     parser.add_argument("--skip-existing", action="store_true", default=True,
                         help="Skip already-downloaded files (default: True)")
     parser.add_argument("--rps", type=float, default=3.0, help="Max requests per second (default: 3.0)")
+    parser.add_argument("--process", action="store_true",
+                        help="Process each extracted XML into the database immediately (streaming mode)")
+    parser.add_argument("--db", default="bibliographic_data.db",
+                        help="Path to SQLite database (used with --process, default: %(default)s)")
     parser.add_argument("--log-level", default="INFO", help="Log level (default: INFO)")
     args = parser.parse_args()
 
     setup_logging(level=getattr(logging, args.log_level.upper()))
+
+    if args.process and not args.db:
+        parser.error("--db is required when --process is specified")
 
     api_key = resolve_api_key(args)
     rl = RateLimiter(args.rps)
@@ -395,11 +480,14 @@ def main():
         logging.error("Start date must be before end date")
         sys.exit(1)
 
+    db_path = args.db if args.process else None
+
     download_dataset(
         args.dataset, start_date, end_date,
         args.output_dir, api_key, rl,
         batch_weeks=args.batch_weeks,
         skip_existing=args.skip_existing,
+        db_path=db_path,
     )
 
 

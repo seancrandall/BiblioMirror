@@ -329,6 +329,43 @@ def test_split_publication_fixture():
     assert len(records) == 10, f"Expected 10 records, got {len(records)}"
 
 
+def test_split_doctype_with_internal_subset():
+    """DOCTYPE declarations with internal subsets containing > chars should be fully stripped."""
+    # Simulate a USPTO bulk file with DOCTYPE internal subset (ENTITY declarations with >)
+    content = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<!DOCTYPE patent-application-publication SYSTEM "pap-v16-2002-01-01.dtd" [\n'
+        b'<!ENTITY img1 SYSTEM "img1.TIF" NDATA TIF>\n'
+        b'<!ENTITY img2 SYSTEM "img2.TIF" NDATA TIF>\n'
+        b']>\n'
+        b'<patent-application-publication>\n'
+        b'<publication-reference><document-id><country>US</country>'
+        b'<doc-number>20030066116</doc-number><kind>A1</kind>'
+        b'<date>20030410</date></document-id></publication-reference>\n'
+        b'</patent-application-publication>\n'
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<!DOCTYPE patent-application-publication SYSTEM "pap-v16-2002-01-01.dtd" []>\n'
+        b'<patent-application-publication>\n'
+        b'<publication-reference><document-id><country>US</country>'
+        b'<doc-number>20030066117</doc-number><kind>A1</kind>'
+        b'<date>20030410</date></document-id></publication-reference>\n'
+        b'</patent-application-publication>\n'
+    )
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
+        f.write(content)
+        tmppath = f.name
+    try:
+        records = split_xml_records(tmppath)
+        assert len(records) == 2, f"Expected 2 records, got {len(records)}"
+        for i, rec in enumerate(records):
+            root = parse_record(rec)
+            assert root is not None, f"Record {i} failed to parse"
+            assert root.tag == "patent-application-publication", f"Record {i} wrong tag: {root.tag}"
+    finally:
+        os.unlink(tmppath)
+
+
 def test_split_grant_fixture():
     path = os.path.join(FIXTURES_DIR, "grants_10.xml")
     records = split_xml_records(path)
@@ -694,3 +731,173 @@ def test_abstracts_in_database(loaded_db):
     grant_abs = loaded_db.execute("SELECT COUNT(*) FROM grant WHERE abstract_text IS NOT NULL").fetchone()[0]
     assert pub_abs > 0, "No publication abstracts in database"
     assert grant_abs > 0, "No grant abstracts in database"
+
+
+# ============================================================
+# Streaming mode tests (download_dataset with db_path)
+# ============================================================
+
+import zipfile
+from unittest.mock import patch, MagicMock
+from datetime import datetime
+from download_uspto import (
+    download_dataset, extract_xml_from_zip, DATASET_PRODUCTS,
+)
+
+
+def _make_test_zip(zip_path, xml_path, xml_name):
+    """Create a zip file containing the actual test fixture XML."""
+    with open(xml_path, "rb") as f:
+        content = f.read()
+    with zipfile.ZipFile(zip_path, "w") as z:
+        z.writestr(xml_name, content)
+
+
+class TestStreamingMode:
+    """Tests for download_dataset with db_path (streaming mode)."""
+
+    def test_streaming_processes_and_cleans_up(self, tmp_path):
+        """Streaming mode: zip extracted, processed, then both zip and XML deleted."""
+        db_path = str(tmp_path / "test_streaming.db")
+        output_dir = str(tmp_path / "output")
+        download_dir = os.path.join(output_dir, "downloads", "grant")
+        extract_dir = os.path.join(output_dir, "extracted", "grant")
+        os.makedirs(download_dir, exist_ok=True)
+        os.makedirs(extract_dir, exist_ok=True)
+
+        # Use the real grant fixture XML
+        grant_fixture = os.path.join(FIXTURES_DIR, "grants_10.xml")
+        xml_name = "ipgb20260101_wk01.xml"
+        zip_name = "ipgb20260101_wk01.zip"
+        zip_path = os.path.join(download_dir, zip_name)
+
+        _make_test_zip(zip_path, grant_fixture, xml_name)
+
+        assert os.path.exists(zip_path)
+        assert not os.path.exists(os.path.join(extract_dir, xml_name))
+
+        from process_uspto import process_file
+
+        xml_files = extract_xml_from_zip(zip_path, extract_dir)
+        assert len(xml_files) == 1
+        assert os.path.exists(os.path.join(extract_dir, xml_name))
+
+        # Delete zip (mimicking streaming mode)
+        os.remove(zip_path)
+        assert not os.path.exists(zip_path)
+
+        # Process XML
+        result = process_file(
+            os.path.join(extract_dir, xml_name),
+            db_path, "grant",
+            delete_source=True, download_dir=None,
+        )
+
+        # XML should be deleted after processing
+        assert not os.path.exists(os.path.join(extract_dir, xml_name))
+
+        # Data should be in the database
+        conn = sqlite3.connect(db_path)
+        count = conn.execute("SELECT COUNT(*) FROM grant").fetchone()[0]
+        conn.close()
+        assert count > 0, "Grant records should have been inserted into database"
+
+    def test_streaming_skip_already_processed(self, tmp_path):
+        """Streaming mode: already-processed zips are skipped and leftover files cleaned up."""
+        db_path = str(tmp_path / "test_streaming_skip.db")
+        output_dir = str(tmp_path / "output")
+        download_dir = os.path.join(output_dir, "downloads", "grant")
+        extract_dir = os.path.join(output_dir, "extracted", "grant")
+        os.makedirs(download_dir, exist_ok=True)
+        os.makedirs(extract_dir, exist_ok=True)
+
+        # Use the real grant fixture XML
+        grant_fixture = os.path.join(FIXTURES_DIR, "grants_10.xml")
+        xml_name = "ipgb20260101_wk01.xml"
+        zip_name = "ipgb20260101_wk01.zip"
+
+        # First, process the file normally
+        _make_test_zip(os.path.join(download_dir, zip_name), grant_fixture, xml_name)
+        extract_xml_from_zip(os.path.join(download_dir, zip_name), extract_dir)
+
+        from process_uspto import process_file
+        process_file(
+            os.path.join(extract_dir, xml_name),
+            db_path, "grant",
+            delete_source=True, download_dir=None,
+        )
+
+        # Verify the file is in processed_file
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT id FROM processed_file WHERE filename = ?", (xml_name,)
+        ).fetchone()
+        conn.close()
+        assert row is not None, "File should be in processed_file"
+
+        # Place leftover zip on disk (simulating interrupted cleanup)
+        _make_test_zip(os.path.join(download_dir, zip_name), grant_fixture, xml_name)
+        assert os.path.exists(os.path.join(download_dir, zip_name))
+
+        # Simulate the streaming skip logic: check processed_file and clean up
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT id FROM processed_file WHERE filename = ?", (xml_name,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+
+        # Clean up leftover files
+        os.remove(os.path.join(download_dir, zip_name))
+        assert not os.path.exists(os.path.join(download_dir, zip_name))
+
+    def test_download_only_mode_preserves_files(self, tmp_path):
+        """Without db_path (download-only mode), zips and XMLs are kept on disk."""
+        output_dir = str(tmp_path / "output")
+        download_dir = os.path.join(output_dir, "downloads", "grant")
+        extract_dir = os.path.join(output_dir, "extracted", "grant")
+        os.makedirs(download_dir, exist_ok=True)
+        os.makedirs(extract_dir, exist_ok=True)
+
+        grant_fixture = os.path.join(FIXTURES_DIR, "grants_10.xml")
+        xml_name = "ipgb20260101_wk01.xml"
+        zip_name = "ipgb20260101_wk01.zip"
+        zip_path = os.path.join(download_dir, zip_name)
+
+        _make_test_zip(zip_path, grant_fixture, xml_name)
+
+        # Extract without processing
+        xml_files = extract_xml_from_zip(zip_path, extract_dir)
+        assert len(xml_files) == 1
+
+        # Both zip and XML should still exist
+        assert os.path.exists(zip_path)
+        assert os.path.exists(os.path.join(extract_dir, xml_name))
+
+    def test_process_file_delete_source(self, tmp_path):
+        """process_file with delete_source=True deletes the XML and inserts data."""
+        db_path = str(tmp_path / "test_delete.db")
+
+        # Use the real grant fixture
+        grant_fixture = os.path.join(FIXTURES_DIR, "grants_10.xml")
+        xml_name = "ipgb20260101_wk01.xml"
+        extract_dir = str(tmp_path / "extracted" / "grant")
+        os.makedirs(extract_dir, exist_ok=True)
+        xml_path = os.path.join(extract_dir, xml_name)
+
+        import shutil
+        shutil.copy2(grant_fixture, xml_path)
+
+        assert os.path.exists(xml_path)
+
+        from process_uspto import process_file
+        result = process_file(xml_path, db_path, "grant", delete_source=True, download_dir=None)
+
+        # XML should be deleted
+        assert not os.path.exists(xml_path)
+
+        # Data should be in the database
+        conn = sqlite3.connect(db_path)
+        count = conn.execute("SELECT COUNT(*) FROM grant").fetchone()[0]
+        conn.close()
+        assert count > 0

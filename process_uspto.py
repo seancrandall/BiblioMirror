@@ -45,8 +45,8 @@ def split_xml_records(filepath):
     records = []
     for part in parts[1:]:  # First part is empty/preamble
         record = b"<?xml version" + part
-        # Strip DOCTYPE line
-        record = re.sub(rb"<!DOCTYPE[^>]*>\s*", b"", record, count=1)
+        # Strip DOCTYPE declaration (may include internal subset with > chars)
+        record = re.sub(rb"<!DOCTYPE\b[^\[]*(?:\[[^\]]*\]\s*)?>", b"", record, count=1)
         # Strip any remaining XML declaration whitespace issues
         record = record.strip()
         if record:
