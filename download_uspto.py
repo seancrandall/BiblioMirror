@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import zipfile
@@ -195,6 +196,66 @@ def extract_download_urls(api_response):
     return urls
 
 
+def parse_file_date(filename):
+    """Extract a representative date from a USPTO bulk data filename.
+
+    Recognized formats:
+    - Weekly:   ipgb20260428_wk17.zip → 2026-04-28
+    - Quarterly: 2007_4_2_xml.zip     → 2007-10-01 (Q4 starts Oct 1)
+    - Annual:    2002_xml.zip          → 2002-01-01
+
+    Returns a datetime or None if the date cannot be parsed.
+    """
+    # Weekly format: 8 consecutive digits YYYYMMDD (e.g. ipgb20260428_wk17.zip)
+    match = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            pass
+
+    # Quarterly format: YYYY_Q_P_xml.zip (e.g. 2007_4_2_xml.zip → Q4 2007)
+    match = re.search(r"(\d{4})_(\d)_(\d+)_xml", filename)
+    if match:
+        year = int(match.group(1))
+        quarter = int(match.group(2))
+        if 1 <= quarter <= 4:
+            month = (quarter - 1) * 3 + 1
+            try:
+                return datetime(year, month, 1)
+            except ValueError:
+                pass
+
+    # Annual format: YYYY_xml.zip (e.g. 2002_xml.zip)
+    match = re.search(r"(\d{4})_xml\b", filename)
+    if match:
+        year = int(match.group(1))
+        try:
+            return datetime(year, 1, 1)
+        except ValueError:
+            pass
+
+    return None
+
+
+def filter_urls_by_date_range(urls, start_date, end_date):
+    """Filter (name, url) pairs to only those within the requested date range.
+
+    The USPTO ODP API ignores fileDataFromDate/fileDataToDate and returns the
+    entire file catalog on every call, so we must filter client-side.
+    Files with unparseable dates are excluded (not downloaded).
+    """
+    filtered = []
+    for name, url in urls:
+        file_date = parse_file_date(name)
+        if file_date is None:
+            logging.warning("Cannot parse date from filename: %s, skipping", name)
+            continue
+        if start_date <= file_date < end_date:
+            filtered.append((name, url))
+    return filtered
+
+
 def download_zip(url, dest_path, api_key, rl):
     """Download a zip file from the given URL."""
     headers = {"x-api-key": api_key}
@@ -248,6 +309,7 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
     logging.info("Downloading %s: %s to %s in %d batches", dataset, start_date, end_date, len(batches))
 
     total_files = 0
+    seen_names = set()
     for i, (batch_start, batch_end) in enumerate(batches, 1):
         logging.info("Batch %d/%d: %s to %s", i, len(batches), batch_start, batch_end)
 
@@ -263,7 +325,12 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
             logging.debug("API response keys: %s", list(api_response.keys()) if isinstance(api_response, dict) else "not a dict")
             continue
 
-        logging.info("Found %d files in batch %d", len(urls), i)
+        # Filter to only files within the requested date range (API ignores date params)
+        urls = filter_urls_by_date_range(urls, batch_start, batch_end)
+        # Deduplicate across batches (API returns same full catalog each time)
+        urls = [(n, u) for n, u in urls if n not in seen_names]
+
+        logging.info("Found %d files in batch %d (after date filter)", len(urls), i)
 
         for name, url in urls:
             # Determine filename from URL or name
@@ -274,6 +341,8 @@ def download_dataset(dataset, start_date, end_date, output_dir, api_key, rl,
                 name += ".zip"
 
             zip_path = os.path.join(download_dir, name)
+
+            seen_names.add(name)
 
             if skip_existing and os.path.exists(zip_path):
                 logging.info("Skipping existing: %s", name)

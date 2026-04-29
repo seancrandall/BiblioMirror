@@ -144,11 +144,11 @@ def parse_publication(root):
     # invention-title
     d["invention_title"] = text(bib, "invention-title")
 
-    # abstract
-    abstract_el = bib.find("abstract")
+    # abstract — sibling of bib element, not a child
+    abstract_el = root.find("abstract")
     if abstract_el is not None:
-        paragraphs = [p.text.strip() for p in abstract_el.findall("p") if p.text]
-        d["abstract_text"] = " ".join(paragraphs) if paragraphs else None
+        abstract_text = " ".join(t.strip() for t in abstract_el.itertext() if t.strip())
+        d["abstract_text"] = abstract_text if abstract_text else None
     else:
         d["abstract_text"] = None
 
@@ -326,11 +326,11 @@ def parse_grant(root):
         d["number_of_drawing_sheets"] = None
         d["number_of_figures"] = None
 
-    # Abstract
-    abstract_el = bib.find("abstract")
+    # Abstract — sibling of bib element, not a child
+    abstract_el = root.find("abstract")
     if abstract_el is not None:
-        paragraphs = [p.text.strip() for p in abstract_el.findall("p") if p.text]
-        d["abstract_text"] = " ".join(paragraphs) if paragraphs else None
+        abstract_text = " ".join(t.strip() for t in abstract_el.itertext() if t.strip())
+        d["abstract_text"] = abstract_text if abstract_text else None
     else:
         d["abstract_text"] = None
 
@@ -1206,7 +1206,7 @@ class DatabaseLoader:
 # Main processing logic
 # ============================================================
 
-def process_file(filepath, db_path, dataset, delete_source=False):
+def process_file(filepath, db_path, dataset, delete_source=False, download_dir=None):
     """Process a single XML file: split, parse, insert into database."""
     from init_db import init_db
 
@@ -1272,7 +1272,10 @@ def process_file(filepath, db_path, dataset, delete_source=False):
         # Record in processed_file
         # Extract date from filename like ipab20260122_wk04.xml
         date_match = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
-        file_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}" if date_match else None
+        if date_match:
+            file_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+        else:
+            file_date = "unknown"
         week_match = re.search(r"_wk(\d+)", filename)
         week_number = int(week_match.group(1)) if week_match else None
 
@@ -1288,17 +1291,24 @@ def process_file(filepath, db_path, dataset, delete_source=False):
         logging.info("File %s: %d succeeded, %d failed", filename, success_count, failure_count)
 
         # Delete source data if requested
-        if delete_source and failure_count == 0:
-            os.remove(filepath)
-            # Also try to remove the zip if it exists
+        # We delete even if some records failed (duplicates from overlapping data
+        # are normal). The processed_file log ensures we don't reprocess.
+        if delete_source:
+            try:
+                os.remove(filepath)
+                logging.info("Deleted extracted XML: %s", filepath)
+            except OSError as e:
+                logging.warning("Could not delete extracted XML %s: %s", filepath, e)
+            # Delete the corresponding zip if it exists
             zip_name = filename.replace(".xml", ".zip")
-            # Check common locations
-            for d in ["downloads/publication", "downloads/grant", "extracted/publication", "extracted/grant"]:
-                zip_path = os.path.join(os.path.dirname(db_path), d, zip_name)
+            if download_dir:
+                zip_path = os.path.join(download_dir, zip_name)
                 if os.path.exists(zip_path):
-                    os.remove(zip_path)
-                    logging.info("Deleted source zip: %s", zip_path)
-            logging.info("Deleted source XML: %s", filepath)
+                    try:
+                        os.remove(zip_path)
+                        logging.info("Deleted source zip: %s", zip_path)
+                    except OSError as e:
+                        logging.warning("Could not delete zip %s: %s", zip_path, e)
 
         loader.close()
         return failure_count == 0
@@ -1320,6 +1330,8 @@ def main():
                         help="Path to SQLite database (default: %(default)s)")
     parser.add_argument("--delete-source-data", "-d", action="store_true",
                         help="Delete source XML and zip files after successful processing")
+    parser.add_argument("--download-dir", default="downloads",
+                        help="Base directory for downloaded zip files (default: %(default)s)")
     parser.add_argument("--file", nargs="*", help="Process only these specific XML files")
     parser.add_argument("--log-level", default="INFO", help="Log level (default: %(default)s)")
     args = parser.parse_args()
@@ -1327,6 +1339,7 @@ def main():
     setup_logging(level=getattr(logging, args.log_level.upper()))
 
     input_dir = os.path.join(args.input_dir, args.dataset)
+    download_dir = os.path.join(args.download_dir, args.dataset)
     if not os.path.isdir(input_dir):
         logging.error("Input directory does not exist: %s", input_dir)
         sys.exit(1)
@@ -1354,7 +1367,7 @@ def main():
     for i, fname in enumerate(files, 1):
         fpath = os.path.join(input_dir, fname)
         logging.info("Processing [%d/%d]: %s", i, total, fname)
-        if process_file(fpath, args.db, args.dataset, delete_source=args.delete_source_data):
+        if process_file(fpath, args.db, args.dataset, delete_source=args.delete_source_data, download_dir=download_dir):
             ok += 1
 
     logging.info("Done: %d/%d files processed successfully", ok, total)

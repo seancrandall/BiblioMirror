@@ -662,3 +662,35 @@ def test_entity_hash_different_names():
     h1 = compute_entity_hash("Smith", "John", "", "Austin", "TX", "US")
     h2 = compute_entity_hash("Jones", "Mary", "", "Austin", "TX", "US")
     assert h1 != h2
+
+
+# ============================================================
+# Abstract extraction tests
+# ============================================================
+
+def test_publication_abstracts_extracted(publication_records):
+    """Utility publication records should have abstract text."""
+    with_abstract = [d for d in publication_records if d["abstract_text"]]
+    assert len(with_abstract) > 0, "No abstracts extracted from publication fixtures"
+
+
+def test_grant_abstracts_extracted(grant_records):
+    """Utility grant records (B1/B2) should have abstract text."""
+    utility = [d for d in grant_records if d["kind"] in ("B1", "B2")]
+    with_abstract = [d for d in utility if d["abstract_text"]]
+    assert len(with_abstract) > 0, "No abstracts extracted from utility grant fixtures"
+
+
+def test_design_grants_no_abstract(grant_records):
+    """Design patents (S1) should have None abstract."""
+    design = [d for d in grant_records if d["kind"] == "S1"]
+    for d in design:
+        assert d["abstract_text"] is None, f"Design patent {d['doc_number']} should have no abstract"
+
+
+def test_abstracts_in_database(loaded_db):
+    """Abstract text should be stored in the database."""
+    pub_abs = loaded_db.execute("SELECT COUNT(*) FROM publication WHERE abstract_text IS NOT NULL").fetchone()[0]
+    grant_abs = loaded_db.execute("SELECT COUNT(*) FROM grant WHERE abstract_text IS NOT NULL").fetchone()[0]
+    assert pub_abs > 0, "No publication abstracts in database"
+    assert grant_abs > 0, "No grant abstracts in database"

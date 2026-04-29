@@ -3,7 +3,7 @@
 # Run: ./watch_progress.sh
 # Polls every 5 minutes and shows record counts
 
-DB="/data/BiblioData/bibliographic_data.db"
+DB="/data/USPTO/BiblioData/bibliographic_data.db"
 
 while true; do
     PUBS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM publication;" 2>/dev/null || echo "DB locked")

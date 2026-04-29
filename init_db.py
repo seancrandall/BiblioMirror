@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS assignee (
 
 CREATE TABLE IF NOT EXISTS examiner (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    last_name TEXT NOT NULL,
+    last_name TEXT,
     first_name TEXT,
     department TEXT,
     examiner_type TEXT NOT NULL DEFAULT 'primary',  -- 'primary' or 'assistant'

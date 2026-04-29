@@ -5,13 +5,19 @@
 
 set -euo pipefail
 
-WORKDIR="/data/BiblioData"
+WORKDIR="/data/USPTO/BiblioData"
 DB="${WORKDIR}/bibliographic_data.db"
 LOGDIR="${WORKDIR}/logs"
 LOGFILE="${WORKDIR}/biblio_mirror.log"
 
-# Compute date range: last Thursday to this Wednesday
-START_DATE=$(date -d "last Thursday" +%Y-%m-%d)
+# Compute date range: most recent Thursday to today
+# USPTO publications are released Thursday, grants Tuesday.
+# GNU date's "last Thursday" means previous-week Thursday on Thu-Sat,
+# which gives wrong results. Use arithmetic instead.
+DOW=$(date +%u)  # 1=Mon ... 7=Sun
+# Days since Thursday: Thu=0, Fri=1, Sat=2, Sun=3, Mon=4, Tue=5, Wed=6
+DAYS_SINCE_THU=$(( (DOW + 3) % 7 ))
+START_DATE=$(date -d "${DAYS_SINCE_THU} days ago" +%Y-%m-%d)
 END_DATE=$(date +%Y-%m-%d)
 
 mkdir -p "${LOGDIR}" "${WORKDIR}/downloads/publication" "${WORKDIR}/downloads/grant" \
@@ -42,28 +48,16 @@ python3 "${WORKDIR}/download_uspto.py" \
     --skip-existing \
     2>&1 | tee -a "${LOGFILE}"
 
-# Process publications
+# Process publications (delete source data after successful import)
 echo "$(date -Iseconds): Processing publications..." >> "${LOGFILE}"
-python3 "${WORKDIR}/process_uspto.py" \
-    --dataset publication \
-    --db "${DB}" \
-    2>&1 | tee -a "${LOGFILE}"
-
-# Process grants
-echo "$(date -Iseconds): Processing grants..." >> "${LOGFILE}"
-python3 "${WORKDIR}/process_uspto.py" \
-    --dataset grant \
-    --db "${DB}" \
-    2>&1 | tee -a "${LOGFILE}"
-
-# Delete source data after successful processing
-echo "$(date -Iseconds): Cleaning up source data..." >> "${LOGFILE}"
 python3 "${WORKDIR}/process_uspto.py" \
     --dataset publication \
     --db "${DB}" \
     --delete-source-data \
     2>&1 | tee -a "${LOGFILE}"
 
+# Process grants (delete source data after successful import)
+echo "$(date -Iseconds): Processing grants..." >> "${LOGFILE}"
 python3 "${WORKDIR}/process_uspto.py" \
     --dataset grant \
     --db "${DB}" \
