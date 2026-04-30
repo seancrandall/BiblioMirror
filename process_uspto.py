@@ -54,8 +54,59 @@ def split_xml_records(filepath):
     return records
 
 
+# HTML entities that appear in USPTO XML but are not valid in plain XML.
+# The 5 predefined XML entities (&amp; &lt; &gt; &quot; &apos;) are NOT included
+# because lxml handles them natively and replacing them would break the markup.
+HTML_ENTITY_MAP = {
+    "ldquo": "“",  # "
+    "rdquo": "”",  # "
+    "lsquo": "‘",  # '
+    "rsquo": "’",  # '
+    "mdash": "—",  # —
+    "ndash": "–",  # –
+    "bull":  "•",  # •
+    "hellip": "…", # …
+    "trade": "™",  # ™
+    "copy":  "©",  # ©
+    "reg":   "®",  # ®
+    "sect":  "§",  # §
+    "para":  "¶",  # ¶
+    "deg":   "°",  # °
+    "plusmn": "±", # ±
+    "micro": "µ",  # µ
+    "times": "×",  # ×
+    "divide": "÷", # ÷
+    "frac12": "½", # ½
+    "frac14": "¼", # ¼
+    "frac34": "¾", # ¾
+    "nbsp":  " ",  # non-breaking space
+    # Greek letters sometimes appear in scientific text
+    "alpha": "α", "beta": "β", "gamma": "γ",
+    "delta": "δ", "epsilon": "ε", "zeta": "ζ",
+    "eta":   "η", "theta": "θ", "iota": "ι",
+    "kappa": "κ", "lambda": "λ", "mu": "μ",
+    "nu":    "ν", "xi": "ξ", "pi": "π",
+    "rho":   "ρ", "sigma": "σ", "tau": "τ",
+    "phi":   "φ", "chi": "χ", "psi": "ψ",
+    "omega": "ω",
+}
+
+_HTML_ENTITY_RE = re.compile(
+    b"&(" + b"|".join(k.encode() for k in HTML_ENTITY_MAP) + b");"
+)
+
+
+def _replace_html_entities(xml_bytes):
+    """Replace non-XML HTML entities with their Unicode equivalents."""
+    return _HTML_ENTITY_RE.sub(
+        lambda m: HTML_ENTITY_MAP[m.group(1).decode()].encode("utf-8"),
+        xml_bytes,
+    )
+
+
 def parse_record(xml_bytes):
     """Parse a single XML record string into an lxml Element tree."""
+    xml_bytes = _replace_html_entities(xml_bytes)
     return etree.fromstring(xml_bytes)
 
 

@@ -1,0 +1,4 @@
+2026-04-30 11:54:31,426 INFO: Processing publication abstracts with model nomic-embed-text
+2026-04-30 11:54:34,472 INFO: publication: 6692206 records without embeddings
+2026-04-30 11:54:41,970 INFO: publication: processing 6692206 records
+2026-04-30 11:54:49,563 ERROR: Ollama request failed: 400 Client Error: Bad Request for url: http://localhost:11434/api/embed

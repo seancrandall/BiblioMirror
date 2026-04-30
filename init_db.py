@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS publication (
     series_code TEXT,
     invention_title TEXT,
     abstract_text TEXT,
+    abstract_embedding BLOB,
     UNIQUE(country, doc_number, kind, pub_date)
 );
 
@@ -139,6 +140,7 @@ CREATE TABLE IF NOT EXISTS grant (
     number_of_drawing_sheets INTEGER,
     number_of_figures INTEGER,
     abstract_text TEXT,
+    abstract_embedding BLOB,
     UNIQUE(country, doc_number, kind, pub_date)
 );
 
@@ -455,6 +457,10 @@ CREATE INDEX IF NOT EXISTS idx_field_search_grant ON field_of_classification_sea
 -- Metadata indexes
 CREATE INDEX IF NOT EXISTS idx_processed_file_filename ON processed_file(filename);
 CREATE INDEX IF NOT EXISTS idx_processing_log_timestamp ON processing_log(timestamp);
+
+-- Embedding indexes (partial — only rows that have embeddings)
+CREATE INDEX IF NOT EXISTS idx_publication_abstract_embedding ON publication(abstract_embedding) WHERE abstract_embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_grant_abstract_embedding ON grant(abstract_embedding) WHERE abstract_embedding IS NOT NULL;
 """
 
 SEED_ASSIGNEE_ROLE_CODES = [
@@ -494,6 +500,13 @@ def init_db(db_path: str):
     cur = conn.cursor()
 
     cur.executescript(SCHEMA_SQL)
+
+    # Migrate: add abstract_embedding column if missing (existing databases)
+    for table in ("publication", "grant"):
+        cols = [row[1] for row in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+        if "abstract_embedding" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN abstract_embedding BLOB")
+
     cur.executescript(INDEXES_SQL)
 
     # Seed lookup tables

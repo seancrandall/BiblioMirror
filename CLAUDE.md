@@ -33,6 +33,12 @@ python3 process_uspto.py --dataset {publication,grant} --file specific.xml  # si
 
 # Weekly cron job (streaming mode — downloads from last Thursday to today)
 ./run_weekly.sh
+./run_weekly.sh --embeddings  # also calculate abstract embeddings
+
+# Calculate abstract embeddings (uses local ollama with nomic-embed-text)
+python3 calculate_embeddings.py --db bibliographic_data.db
+python3 calculate_embeddings.py --db bibliographic_data.db --limit 1000  # incremental
+python3 calculate_embeddings.py --dataset publication --limit 100  # single dataset, limited
 
 # Run tests
 pytest test_uspto.py -v
@@ -51,7 +57,7 @@ With `--process --db`, `download_uspto.py` downloads one zip at a time, extracts
 
 1. **`download_uspto.py --process`** — For each zip: download → extract → delete zip → process XML into DB → delete XML. Uses `process_file()` from `process_uspto.py` internally. Checks `processed_file` table for idempotency — re-runs skip already-processed files and clean up leftover disk artifacts.
 
-2. **`process_all.sh` / `run_weekly.sh`** — Shell scripts that use `--process --db` mode. `process_all.sh` runs a full corpus load; `run_weekly.sh` runs incremental weekly updates.
+2. **`process_all.sh` / `run_weekly.sh`** — Shell scripts that use `--process --db` mode. `process_all.sh` runs a full corpus load; `run_weekly.sh` runs incremental weekly updates. Both accept `--embeddings` to also run `calculate_embeddings.py` after the download+process steps.
 
 ### Separate mode (legacy)
 
@@ -63,13 +69,16 @@ Without `--process`, `download_uspto.py` downloads all zips and extracts all XML
 
 - **`process_uspto.py`** — Parses XML and loads into SQLite. `process_file()` is the entry point used by streaming mode. Standalone CLI mode processes all unprocessed XMLs in `extracted/{dataset}/`. Features: XML splitting, entity dedup via SHA256 hashes, idempotent processing via `processed_file` table, `--delete-source-data` for cleanup.
 
-- **`init_db.py`** — Creates the full schema (25+ tables, indexes, seed data). All DDL is `CREATE IF NOT EXISTS`, so it's safe to re-run.
+- **`init_db.py`** — Creates the full schema (25+ tables, indexes, seed data). All DDL is `CREATE IF NOT EXISTS`, so it's safe to re-run. Also migrates existing databases by adding `abstract_embedding BLOB` columns if missing.
+
+- **`calculate_embeddings.py`** — Computes vector embeddings for patent abstracts using ollama (`nomic-embed-text`, 768 dimensions). Stores embeddings as BLOBs (3072 bytes each). Idempotent — only processes records where `abstract_embedding IS NULL`. Called by shell scripts with `--embeddings` flag.
 
 ## Key Design Decisions
 
 - **Streaming mode (recommended)**: With `--process --db`, each zip is processed and cleaned up before downloading the next. Peak disk usage is ~one zip + one XML + database size (~55GB for full corpus vs. ~155GB in legacy mode).
 - **Entity deduplication**: Shared `person` table for both inventors and applicants across publications and grants. Dedup is by `entity_hash` (SHA256 of normalized field concatenation). Same person appearing in multiple patents gets one row.
 - **Idempotent processing**: The `processed_file` table tracks which XML files have been imported. Re-running either mode skips already-processed files. In streaming mode, the `processed_file` check happens before downloading, so interrupted runs resume cleanly.
+- **Abstract embeddings**: Both `publication` and `grant` tables have an `abstract_embedding BLOB` column storing 768-dim float32 vectors from `nomic-embed-text`. Calculated by `calculate_embeddings.py`, triggered by `--embeddings` flag on shell scripts or directly. Design patents (S1) have no abstracts and are skipped.
 - **Polymorphic classification tables**: `classification_ipcr`, `classification_cpc`, and `classification_national` use `source_type` ('publication'/'grant') + `source_id` to reference either main table, rather than separate tables per dataset.
 - **Date ranges**: Publications available from 2001-03-15, grants from 2002-01-01.
 - **API key**: `ODP_API_KEY` env var (preferred) or `--api-key-file` flag. No hardcoded path.

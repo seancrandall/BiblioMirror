@@ -6,6 +6,13 @@
 
 set -euo pipefail
 
+EMBEDDINGS=false
+for arg in "$@"; do
+    case "$arg" in
+        --embeddings) EMBEDDINGS=true ;;
+    esac
+done
+
 WORKDIR="/data/USPTO/BiblioData"
 DB="${WORKDIR}/bibliographic_data.db"
 LOGDIR="${WORKDIR}/logs"
@@ -59,3 +66,10 @@ echo "Publications with abstracts: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM publi
 echo "Grants with abstracts: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM grant WHERE abstract_text IS NOT NULL;')"
 echo "Processed pub files: $(sqlite3 "${DB}" "SELECT COUNT(*) FROM processed_file WHERE dataset='publication';")"
 echo "Processed grant files: $(sqlite3 "${DB}" "SELECT COUNT(*) FROM processed_file WHERE dataset='grant';")"
+
+# Calculate embeddings if requested
+if [ "$EMBEDDINGS" = true ]; then
+    echo "=== $(date -Iseconds): Calculating abstract embeddings ==="
+    echo "$(date -Iseconds): Calculating abstract embeddings" >> "${LOGFILE}"
+    python3 "${WORKDIR}/calculate_embeddings.py" --db "${DB}" 2>&1 | tee -a "${LOGFILE}"
+fi

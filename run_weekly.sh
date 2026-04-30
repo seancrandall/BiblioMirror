@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+EMBEDDINGS=false
+for arg in "$@"; do
+    case "$arg" in
+        --embeddings) EMBEDDINGS=true ;;
+    esac
+done
+
 WORKDIR="/data/USPTO/BiblioData"
 DB="${WORKDIR}/bibliographic_data.db"
 LOGDIR="${WORKDIR}/logs"
@@ -58,3 +65,9 @@ python3 "${WORKDIR}/download_uspto.py" \
 echo "$(date -Iseconds): Weekly run complete (streaming)" >> "${LOGFILE}"
 echo "Publications: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM publication;')" >> "${LOGFILE}"
 echo "Grants: $(sqlite3 "${DB}" 'SELECT COUNT(*) FROM grant;')" >> "${LOGFILE}"
+
+# Calculate embeddings if requested
+if [ "$EMBEDDINGS" = true ]; then
+    echo "$(date -Iseconds): Calculating abstract embeddings..." >> "${LOGFILE}"
+    python3 "${WORKDIR}/calculate_embeddings.py" --db "${DB}" 2>&1 | tee -a "${LOGFILE}"
+fi
